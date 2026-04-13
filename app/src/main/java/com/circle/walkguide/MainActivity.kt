@@ -34,18 +34,35 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.circle.walkguide.ui.CameraPreview
 import com.circle.walkguide.utils.FeedbackManager
 import androidx.compose.ui.platform.LocalContext
 import android.util.Log
+import androidx.camera.view.PreviewView
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import com.circle.walkguide.camera.CameraManager
+import com.circle.walkguide.engine.DecisionEngine
+import com.circle.walkguide.inference.YoloInferenceEngine
+import com.circle.walkguide.model.BBox
+import com.circle.walkguide.model.Detection
 
 import com.circle.walkguide.ui.theme.WalkGuideTheme
+import com.circle.walkguide.utils.PermissionHandler
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        FeedbackManager.initTts(this)
+
+        if (!PermissionHandler.hasCameraPermission(this)) {
+            PermissionHandler.requestCameraPermission(
+                activity = this,
+                onGranted = { /* 카메라 시작 */ },
+                onDenied = { /* 권한 거부 안내 */ }
+            )
+        }
 
         setContent {
             WalkGuideTheme {
@@ -53,14 +70,39 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        FeedbackManager.shutdown()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WalkGuideApp() {
+    // for testing => temporary instance
+    val decisionEngine = remember { DecisionEngine() } // 재생성x, 유지 by remember
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val inferenceEngine = remember { YoloInferenceEngine(context) }
+    val cameraManager = remember {
+        CameraManager(
+            context = context,
+            lifecycleOwner = lifecycleOwner,
+            inferenceEngine = inferenceEngine,
+            onDetectionResult = { detections ->
+                val alerts = decisionEngine.process(detections)
+                alerts.forEach { alert ->
+                    FeedbackManager.speak(alert.message)
+                    Log.d("DE_TEST", "Alert: ${alert.message} / ${alert.riskLevel}")
+                }
+            }
+        )
+    }
+
     var currentMode by remember { mutableStateOf("WALKING") }
     var currentRisk by remember { mutableStateOf("IGNORE") }
-    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -92,8 +134,13 @@ fun WalkGuideApp() {
                     .background(Color.DarkGray),
                 contentAlignment = Alignment.Center
             ) {
-                CameraPreview(
+                AndroidView(  // CameraPreview 대신 이걸로
                     modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        val previewView = PreviewView(ctx)
+                        cameraManager.start(previewView)
+                        previewView
+                    }
                 )
                 Row(
                     modifier = Modifier
@@ -124,7 +171,22 @@ fun WalkGuideApp() {
                 DebugButton(
                     text = "TTS",
                     modifier = Modifier.weight(1f),
-                    onClick = { }
+                    onClick = {
+                        val fakeDetections = listOf(
+                            Detection(
+                                label = "kickboard",
+                                confidence = 0.91f,
+                                bbox = BBox(0.3f, 0.5f, 0.4f, 0.4f),
+                                timestamp = System.currentTimeMillis(),
+                                trackId = 1
+                            )
+                        )
+                        val alerts = decisionEngine.process(fakeDetections)
+                        alerts.forEach { alert ->
+                            FeedbackManager.speak(alert.message)
+                            Log.d("DE_TEST", "Alert: ${alert.message} / ${alert.riskLevel}")
+                        }
+                    }
                 )
                 DebugButton(
                     text = "Haptic",

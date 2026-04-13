@@ -1,4 +1,5 @@
 package com.circle.walkguide.engine
+import com.circle.walkguide.AppConfig
 import com.circle.walkguide.model.Detection
 import com.circle.walkguide.model.TrackedObject
 import com.circle.walkguide.model.Alert
@@ -10,13 +11,15 @@ class DecisionEngine {
     private val trackedObjects = mutableMapOf<Int, TrackedObject>() // Int: trackId
 
     // pre-processing
+    // 지속적으로 trackedObjs를 추가, 업데이트, 제거하는 과정을 거치고
+    // 각 trackingObj에 대하여 위험도를 판단하여 알림 줄 것만 필터링 해서 반환
     fun process(detections: List<Detection>): List<Alert> {
         // 1단계: 이번 detection frame으로 trackedObjects 업데이트
         for (detection in detections) {
-            val existing = trackedObjects[detection.trackId]
+            val existing = trackedObjects[detection.trackId] // 지금 파악하고 있는 trackedObjs
             if (existing != null) { // 있는 거면 업데이트
                 existing.update(detection)
-            } else { // 아니면 인스턴스 생성 후 추가
+            } else { // 없으면 인스턴스 생성 후 추가
                 trackedObjects[detection.trackId] = TrackedObject(
                     trackId = detection.trackId,
                     label = detection.label,
@@ -42,8 +45,8 @@ class DecisionEngine {
             }
         }
 
-        return alerts
         // 4. 알림 줄 것만 필터링해서 반환
+        return alerts
     }
 
     // 위험도 평가 로직 => 알림 과다 방지
@@ -51,7 +54,7 @@ class DecisionEngine {
         val area = obj.current.bbox.width * obj.current.bbox.height
 
         // 너무 작으면(멀면) 무시
-        if (area < 0.02f) return RiskLevel.IGNORE
+        if (area < AppConfig.RISK_AREA_IGNORE) return RiskLevel.IGNORE
 
         // 안정적이지 않으면 무시 => 3프레임 미만이면 노이즈
         if (!obj.isStable()) return RiskLevel.IGNORE
@@ -59,18 +62,18 @@ class DecisionEngine {
         // depth 있으면 거리 기반 판단 (for later)
         obj.current.depth?.let { d ->
             return when {
-                d < 1.0f -> RiskLevel.CRITICAL
-                d < 2.0f -> RiskLevel.WARNING
-                d < 3.0f -> RiskLevel.CAUTION
+                d < AppConfig.RISK_DEPTH_CRITICAL -> RiskLevel.CRITICAL
+                d < AppConfig.RISK_DEPTH_WARNING -> RiskLevel.WARNING
+                d < AppConfig.RISK_DEPTH_CAUTION -> RiskLevel.CAUTION
                 else -> RiskLevel.IGNORE
             }
         }
 
         // depth 없으면 bbox 크기 기반 판단
         return when {
-            area > 0.3f -> RiskLevel.CRITICAL // 30% 이상 => 매우 가까움
-            area > 0.15f -> RiskLevel.WARNING
-            area > 0.05f -> RiskLevel.CAUTION
+            area > AppConfig.RISK_AREA_CRITICAL -> RiskLevel.CRITICAL // 30% 이상 => 매우 가까움
+            area > AppConfig.RISK_AREA_WARNING -> RiskLevel.WARNING
+            area > AppConfig.RISK_AREA_CAUTION -> RiskLevel.CAUTION
             else -> RiskLevel.IGNORE
         }
     }
@@ -120,7 +123,7 @@ class DecisionEngine {
 
         // 마지막 알림으로부터 3초 이내면 스킵 => 나중에 조건 수정 // cooldown
         // 단, 위험도가 높아졌으면 즉시 알림
-        if (now - obj.lastAlertTimestamp < 3000L) {
+        if (now - obj.lastAlertTimestamp < AppConfig.ALERT_COOLDOWN_WALKING) {
             val lastLevel = obj.lastAlertLevel ?: return true
             return risk > lastLevel
         }
