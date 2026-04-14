@@ -1,5 +1,7 @@
 package com.circle.walkguide
 
+import android.hardware.SensorManager
+
 object AppConfig {
 
     // 추론 설정
@@ -33,5 +35,10 @@ object AppConfig {
     const val DEPTH_TRIGGER_CENTER_DISTANCE = 0.2f
 
     // 모드 전환
-    const val STATIONARY_TIMEOUT_MS = 3000L
+    const val STATIONARY_TIMEOUT_MS = 3000L // 3초
+
+    // 가속도 센서 threshold
+    const val MOTION_THRESHOLD = 0.5f
+    // sensor delay
+    const val SENSOR_DELAY = SensorManager.SENSOR_DELAY_GAME
 }

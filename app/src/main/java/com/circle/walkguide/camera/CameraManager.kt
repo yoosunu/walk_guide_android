@@ -18,7 +18,7 @@ class CameraManager(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner, // 앱 background, foreground 상태 연동
     private val inferenceEngine: YoloInferenceEngine, // 프레임 받으면 yolo 추론 엔진에 던짐
-    private val onDetectionResult: (List<Detection>) -> Unit
+    private val onDetectionResult: (List<Detection>, android.graphics.Bitmap?) -> Unit
 ) {
     private val executor = Executors.newSingleThreadExecutor() // camera frame 처리를 위한 별도 스레드
     private var frameCount = 0 // 3 프레임에 한 번. 현재 몇 프레임째인지 세는 변수
@@ -43,8 +43,9 @@ class CameraManager(
                     analysis.setAnalyzer(executor) { imageProxy ->
                         frameCount++
                         if (frameCount % AppConfig.INFERENCE_INTERVAL_WALKING == 0) { // 3프레임에 1번 추론
+                            val bitmap = imageProxy.toBitmap()
                             val detections = inferenceEngine.detect(imageProxy) // 추론 실행
-                            onDetectionResult(detections) // 결과를 콜백으로 넘김 => DE와의 연결점
+                            onDetectionResult(detections, bitmap) // 결과를 콜백으로 넘김 => DE와의 연결점
                         }
                         imageProxy.close() // 안 닫으면 다음 프레임 못받음
                     }

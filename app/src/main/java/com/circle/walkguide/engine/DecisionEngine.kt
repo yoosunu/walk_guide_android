@@ -1,4 +1,5 @@
 package com.circle.walkguide.engine
+import androidx.camera.core.ImageProxy
 import com.circle.walkguide.AppConfig
 import com.circle.walkguide.model.Detection
 import com.circle.walkguide.model.TrackedObject
@@ -13,7 +14,7 @@ class DecisionEngine {
     // pre-processing
     // 지속적으로 trackedObjs를 추가, 업데이트, 제거하는 과정을 거치고
     // 각 trackingObj에 대하여 위험도를 판단하여 알림 줄 것만 필터링 해서 반환
-    fun process(detections: List<Detection>): List<Alert> {
+    fun process(detections: List<Detection>, frame: ImageProxy? = null): List<Alert> {
         // 1단계: 이번 detection frame으로 trackedObjects 업데이트
         for (detection in detections) {
             val existing = trackedObjects[detection.trackId] // 지금 파악하고 있는 trackedObjs
@@ -37,6 +38,13 @@ class DecisionEngine {
         val alerts = mutableListOf<Alert>()
 
         for ((_, obj) in trackedObjects) {
+
+            // Depth 추론 자리 (비전팀 모델 붙으면 구현)
+            if (obj.shouldTriggerDepth() && frame != null) {
+                // TODO: val depth = depthEngine.run(frame)
+                // TODO: obj.current = obj.current.copy(depth = depth)
+            }
+
             val risk = assessRisk(obj)
             if (shouldAlert(obj, risk)) {
                 alerts.add(buildAlert(obj, risk))
