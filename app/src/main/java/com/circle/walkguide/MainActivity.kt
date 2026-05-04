@@ -60,6 +60,13 @@ import com.circle.walkguide.model.Detection
 import com.circle.walkguide.ui.theme.WalkGuideTheme
 import com.circle.walkguide.utils.PermissionHandler
 
+// 화면에 표시할 추론 통계
+data class InferenceStats(
+    val hardwareName: String = "CPU",
+    val inferenceMs: Long = 0L,
+    val fps: Float = 0f
+)
+
 class MainActivity : ComponentActivity(), SensorEventListener // 다중 구현
 {
 
@@ -128,6 +135,8 @@ class MainActivity : ComponentActivity(), SensorEventListener // 다중 구현
 @Composable
 fun WalkGuideApp(appMode: MutableState<AppMode>) {
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) } // for box overlay
+    var inferenceStats by remember { mutableStateOf(InferenceStats()) } // 화면 stats 표시용
+    var lastInferenceTime = remember { 0L } // FPS 계산용
 
     // for testing => temporary instance
     val decisionEngine = remember { DecisionEngine() } // 재생성x, 유지 by remember
@@ -141,8 +150,20 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
             lifecycleOwner = lifecycleOwner,
             inferenceEngine = inferenceEngine,
             onDetectionResult = { newDetections, _ -> // _ : Bitmap (not using here)
+                // FPS 계산
+                val now = System.currentTimeMillis()
+                val fps = if (lastInferenceTime > 0L) {
+                    1000f / (now - lastInferenceTime)
+                } else 0f
+                lastInferenceTime = now
+
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     detections = newDetections
+                    inferenceStats = InferenceStats(
+                        hardwareName = inferenceEngine.getCurrentHardwareName(),
+                        inferenceMs = inferenceEngine.lastInferenceMs,
+                        fps = fps
+                    )
                 }
                 val alerts = decisionEngine.process(newDetections)
                 alerts.forEach { alert ->
@@ -223,6 +244,7 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                         )
                     }
                 }
+                // Mode, Risk 텍스트
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -237,6 +259,33 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                     Text(
                         text = "Risk: $currentRisk",
                         color = Color.Red
+                    )
+                }
+                // 추론 stats 오버레이 (우측 하단)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .background(
+                            Color.Black.copy(alpha = 0.5f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = "HW: ${inferenceStats.hardwareName}",
+                        color = Color.Yellow,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = "${inferenceStats.inferenceMs}ms",
+                        color = Color.Yellow,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = "${"%.1f".format(inferenceStats.fps)} fps",
+                        color = Color.Yellow,
+                        fontSize = 12.sp
                     )
                 }
             }

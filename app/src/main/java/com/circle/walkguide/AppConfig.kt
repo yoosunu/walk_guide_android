@@ -5,7 +5,7 @@ import android.hardware.SensorManager
 object AppConfig {
 
     // 추론 설정
-    const val INFERENCE_INTERVAL_WALKING = 3
+    const val INFERENCE_INTERVAL_WALKING = 5
     const val INFERENCE_INTERVAL_STATIONARY = 5
 
     // 위험도 임계값 (bbox 면적 기반)
@@ -23,10 +23,20 @@ object AppConfig {
     const val ALERT_COOLDOWN_WALKING = 3000L
     const val ALERT_COOLDOWN_STATIONARY = 5000L
 
-    // 모델 설정
-    const val MODEL_FILE = "yolo.tflite"
+    // model file format
+    const val MODEL_FILE_NPU = "yolo_npu.tflite"
+    const val MODEL_FILE_CPU = "yolo_cpu.tflite"
+    const val MODEL_FILE_GPU = "yolo_gpu.tflite"
     const val CONFIDENCE_THRESHOLD = 0.5f
     const val INPUT_SIZE = 640
+
+    // inference hw selection
+    const val USE_CPU = 0
+    const val USE_GPU = 1
+    const val USE_NPU = 2
+    const val INFERENCE_HARDWARE = USE_NPU
+//    const val INFERENCE_HARDWARE = USE_CPU
+//    const val INFERENCE_HARDWARE = USE_GPU
 
     // 추적 설정
     const val STABLE_FRAME_THRESHOLD = 3
@@ -41,4 +51,6 @@ object AppConfig {
     const val MOTION_THRESHOLD = 0.5f
     // sensor delay
     const val SENSOR_DELAY = SensorManager.SENSOR_DELAY_GAME
+
+
 }
