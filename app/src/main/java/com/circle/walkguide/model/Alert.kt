@@ -10,5 +10,5 @@ data class Alert(
     val alertType: AlertType,   // 어떤 종류의 알림인지
     val distance: Float?,       // 얼마나 멀리 (없으면 null)
     val timestamp: Long,        // 언제 만들어진 알림인지 for avoid old alarm
-    val message: String         // TTS가 읽을 텍스트
+    val message: String,         // TTS가 읽을 텍스트
 )

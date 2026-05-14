@@ -29,39 +29,39 @@ object ImagePreprocessor {
     ): ByteBuffer {
         val bitmapStart = System.nanoTime()         // 추가
         val bitmap = imageProxy.toBitmap()
+
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        val rotatedBitmap = if (rotation != 0) {
+            val matrix = android.graphics.Matrix()
+            matrix.postRotate(rotation.toFloat())
+            android.graphics.Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        } else bitmap
+
         val bitmapEnd = System.nanoTime()           // 추가
         Log.d("PERF", "toBitmap: ${(bitmapEnd - bitmapStart) / 1_000_000}ms")  // 추가
+        Log.d("CAMERA", "rotation: ${imageProxy.imageInfo.rotationDegrees}")
 
-        val resized = Bitmap.createScaledBitmap(
-            bitmap,
-            INPUT_SIZE,
-            INPUT_SIZE,
-            false
-        )
+        // resize to 640 x 640
+        val resized = Bitmap.createScaledBitmap(rotatedBitmap, INPUT_SIZE, INPUT_SIZE, true)
 
         return when (hardwareMode) {
-            AppConfig.USE_NPU -> processInt8(resized)
+            AppConfig.USE_NPU -> processInt8(resized) // NPU 면 int8로
             else -> processFloat32(resized)
         }
     }
 
+    // for NPU
     private fun processInt8(bitmap: Bitmap): ByteBuffer {
         int8Buffer.clear()
 
-        bitmap.getPixels(
-            pixels,
-            0,
-            INPUT_SIZE,
-            0,
-            0,
-            INPUT_SIZE,
-            INPUT_SIZE
-        )
+        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
+        val array = int8Buffer.array()
+        var idx = 0
         for (pixel in pixels) {
-            int8Buffer.put(((pixel shr 16) and 0xFF).toByte()) // R
-            int8Buffer.put(((pixel shr 8) and 0xFF).toByte())  // G
-            int8Buffer.put((pixel and 0xFF).toByte())          // B
+            array[idx++] = (((pixel shr 16) and 0xFF) - 128).toByte() // R
+            array[idx++] = (((pixel shr 8) and 0xFF) - 128).toByte()  // G
+            array[idx++] = ((pixel and 0xFF) - 128).toByte()           // B
         }
 
         int8Buffer.rewind()

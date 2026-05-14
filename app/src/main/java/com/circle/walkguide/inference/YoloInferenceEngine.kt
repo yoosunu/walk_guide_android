@@ -10,22 +10,17 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
+import org.tensorflow.lite.DataType
 
 class YoloInferenceEngine(private val context: Context) {
 
+    // init
     private var interpreter: Interpreter? = null // 모델을 실행하는 엔진
     private var isModelLoaded = false
-    private var currentHardware = AppConfig.USE_CPU // 실제로 사용 중인 하드웨어
+    private var currentHardware = AppConfig.USE_CPU // 실제로 사용 중인 하드웨어 => default: cpu
     var lastInferenceMs: Long = 0L // 외부에서 stats 읽을 수 있게
 
-    // companion object == static
-    companion object {
-        // MODEL_FILE & CONFIDENCE_THRESHOLD is on the AppConfig
-        val CLASS_NAMES = listOf(
-            "stairs", "manhole", "curb", "hole", "person", "kickboard"
-            // 순서 맞아야 됨.
-        )
-    }
+    private val tracker = IouTracker() // deepSort
 
     // init => 인스턴스 생성시 자동 실행
     // AppConfig.INFERENCE_HARDWARE 값으로 하드웨어 지정
@@ -95,7 +90,7 @@ class YoloInferenceEngine(private val context: Context) {
 
     // Real Detect || Fake Detect
     fun detect(imageProxy: ImageProxy): List<Detection> {
-        return if (isModelLoaded) {
+        return if (isModelLoaded && !AppConfig.USE_FAKE_DETECT) {
             realDetect(imageProxy)
         } else {
             fakeDetect()
@@ -117,171 +112,243 @@ class YoloInferenceEngine(private val context: Context) {
         val preprocessEnd = System.nanoTime()
 
         // 출력 버퍼 준비
-        // YOLOv11n 출력 shape: [1, 84, 8400]
-        // 후에 [1, 10, 8400] 처럼 됨
-        // 1: 배치 크기 (한 번에 이미지 1장 처리)
-        // 84 = 4(bbox): x, y, w, h + 80(클래스) → 우리 클래스 수에 따라 바뀔 수 있음
-        // 8400: 감지 후보군
+        // 이 모델의 출력 shape: [1, 300, 6]
+        // 300: 감지 후보 수
+        // 6: x1, y1, x2, y2, confidence, class_id
         val outputPrepareStart = System.nanoTime()
-        val outputShape = interpreter.getOutputTensor(0).shape()
-        val numAttributes = outputShape[1] // 84
-        val numDetections = outputShape[2] // 8400
+
+        val outputTensor = interpreter.getOutputTensor(0)
+        val outputShape = outputTensor.shape()
+        val outputType = outputTensor.dataType()
+        val outputQuant = outputTensor.quantizationParams()
+
+        val numDetections = outputShape[1]
+        val numValues = outputShape[2]
+
         val outputPrepareEnd = System.nanoTime()
 
         // NPU(int8) 모델은 출력도 int8, CPU/GPU는 float32
         val result: List<Detection>
 
-        if (currentHardware == AppConfig.USE_NPU) {
-            val output = Array(1) { Array(numAttributes) { ByteArray(numDetections) } }
-
-            val inferenceStart = System.nanoTime()
-            interpreter.run(input, output)
-            val inferenceEnd = System.nanoTime()
-
-            val postprocessStart = System.nanoTime()
-            result = parseOutputInt8(output, numAttributes, numDetections)
-            val postprocessEnd = System.nanoTime()
-
-            lastInferenceMs = (inferenceEnd - inferenceStart) / 1_000_000
-
-            Log.d(
-                "PERF",
-                "[${getCurrentHardwareName()}] " +
-                        "preprocess=${(preprocessEnd - preprocessStart) / 1_000_000}ms, " +
-                        "outputPrepare=${(outputPrepareEnd - outputPrepareStart) / 1_000_000}ms, " +
-                        "inference=${(inferenceEnd - inferenceStart) / 1_000_000}ms, " +
-                        "postprocess=${(postprocessEnd - postprocessStart) / 1_000_000}ms, " +
-                        "total=${(postprocessEnd - totalStart) / 1_000_000}ms"
-            )
-
-            Log.d("INFERENCE", "[${getCurrentHardwareName()}] 추론시간: ${lastInferenceMs}ms")
-        } else {
-            val output = Array(1) { Array(numAttributes) { FloatArray(numDetections) } } // 모델 결과가 담기는 곳
-
-            val inferenceStart = System.nanoTime()
-            interpreter.run(input, output)
-            val inferenceEnd = System.nanoTime()
-
-            val postprocessStart = System.nanoTime()
-            result = parseOutput(output, numAttributes, numDetections)
-            val postprocessEnd = System.nanoTime()
-
-            lastInferenceMs = (inferenceEnd - inferenceStart) / 1_000_000
-
-            Log.d(
-                "PERF",
-                "[${getCurrentHardwareName()}] " +
-                        "preprocess=${(preprocessEnd - preprocessStart) / 1_000_000}ms, " +
-                        "outputPrepare=${(outputPrepareEnd - outputPrepareStart) / 1_000_000}ms, " +
-                        "inference=${(inferenceEnd - inferenceStart) / 1_000_000}ms, " +
-                        "postprocess=${(postprocessEnd - postprocessStart) / 1_000_000}ms, " +
-                        "total=${(postprocessEnd - totalStart) / 1_000_000}ms"
-            )
-
-            Log.d("INFERENCE", "[${getCurrentHardwareName()}] 추론시간: ${lastInferenceMs}ms")
-        }
-
-        return result
-    }
-
-    // float32 모델 결과 파싱 (CPU / GPU)
-    private fun parseOutput(
-        output: Array<Array<FloatArray>>,
-        numAttributes: Int,
-        numDetections: Int
-    ): List<Detection> {
-        val detections = mutableListOf<Detection>()
-        val numClasses = numAttributes - 4 // bbox 4개 제외
-
-        for (i in 0 until numDetections) {
-            val x = output[0][0][i]
-            val y = output[0][1][i]
-            val w = output[0][2][i]
-            val h = output[0][3][i]
-
-            // 클래스별 confidence 중 가장 높은 것
-            var maxConf = 0f
-            var maxIdx = 0
-            for (c in 0 until numClasses) {
-                val conf = output[0][4 + c][i]
-                if (conf > maxConf) {
-                    maxConf = conf
-                    maxIdx = c
+        if (currentHardware == AppConfig.USE_NPU && outputType == DataType.INT8) {
+            val output = Array(1) {
+                Array(numDetections) {
+                    ByteArray(numValues)
                 }
             }
 
-            // threshold 이하 필터링
-            if (maxConf < AppConfig.CONFIDENCE_THRESHOLD) continue
+            val inferenceStart = System.nanoTime()
+            interpreter.run(input, output)
+            val inferenceEnd = System.nanoTime()
+
+            val postprocessStart = System.nanoTime()
+            result = parseOutputInt8NPU(
+                output,
+                numDetections,
+                numValues,
+                outputQuant.scale,
+                outputQuant.zeroPoint
+            )
+            val postprocessEnd = System.nanoTime()
+
+//            lastInferenceMs = (inferenceEnd - inferenceStart) / 1_000_000
+            lastInferenceMs = (postprocessEnd - totalStart) / 1_000_000
+
+
+            Log.d(
+                "PERF",
+                "[${getCurrentHardwareName()}] " +
+                        "preprocess=${(preprocessEnd - preprocessStart) / 1_000_000}ms, " +
+                        "outputPrepare=${(outputPrepareEnd - outputPrepareStart) / 1_000_000}ms, " +
+                        "inference=${(inferenceEnd - inferenceStart) / 1_000_000}ms, " +
+                        "postprocess=${(postprocessEnd - postprocessStart) / 1_000_000}ms, " +
+                        "total=${(postprocessEnd - totalStart) / 1_000_000}ms"
+            )
+            Log.d("INFERENCE", "[${getCurrentHardwareName()}] 추론시간: ${lastInferenceMs}ms")
+
+        } else {
+            val output = Array(1) {
+                Array(numDetections) {
+                    FloatArray(numValues)
+                }
+            }
+
+            val inferenceStart = System.nanoTime()
+            interpreter.run(input, output)
+            val inferenceEnd = System.nanoTime()
+
+            val postprocessStart = System.nanoTime()
+            result = parseOutput(output, numDetections)
+            val postprocessEnd = System.nanoTime()
+
+//            lastInferenceMs = (inferenceEnd - inferenceStart) / 1_000_000
+            lastInferenceMs = (postprocessEnd - totalStart) / 1_000_000
+
+            Log.d(
+                "PERF",
+                "[${getCurrentHardwareName()}] " +
+                        "preprocess=${(preprocessEnd - preprocessStart) / 1_000_000}ms, " +
+                        "outputPrepare=${(outputPrepareEnd - outputPrepareStart) / 1_000_000}ms, " +
+                        "inference=${(inferenceEnd - inferenceStart) / 1_000_000}ms, " +
+                        "postprocess=${(postprocessEnd - postprocessStart) / 1_000_000}ms, " +
+                        "total=${(postprocessEnd - totalStart) / 1_000_000}ms"
+            )
+            Log.d("INFERENCE", "[${getCurrentHardwareName()}] 추론시간: ${lastInferenceMs}ms")
+        }
+
+        return tracker.update(result).also { tracked ->
+            if (tracked.isNotEmpty()) {
+                Log.d("DETECTION", "감지: ${tracked.size}개 / ${tracked.map { "${it.label}(${String.format("%.2f", it.confidence)}) id=${it.trackId}" }}")
+            }
+        }
+    }
+
+    // float32 모델 출력 파싱 (CPU / GPU)
+    // output shape: [1, 300, 6]
+    // 각 detection: [x1, y1, x2, y2, confidence, class_id]
+    // x1, y1, x2, y2는 픽셀 단위 → INPUT_SIZE로 나눠서 정규화
+    private fun parseOutput(
+        output: Array<Array<FloatArray>>,
+        numDetections: Int
+    ): List<Detection> {
+        val detections = mutableListOf<Detection>()
+
+        for (i in 0 until numDetections) {
+            val x1      = output[0][i][0]
+            val y1      = output[0][i][1]
+            val x2      = output[0][i][2]
+            val y2      = output[0][i][3]
+            val conf    = output[0][i][4]
+            val classId = output[0][i][5].toInt()
+
+            if (classId < 0 || classId >= AppConfig.CLASS_NAMES.size) continue
 
             // 클래스 인덱스가 범위 벗어나면 무시
-            val label = CLASS_NAMES.getOrNull(maxIdx) ?: continue
+            val label = AppConfig.CLASS_NAMES.getOrNull(classId) ?: continue
+
+            // 클래스별 threshold 적용
+            val threshold = AppConfig.STATIC_CLASS_THRESHOLD[label]
+                ?: AppConfig.DYNAMIC_CLASS_THRESHOLD[label]
+                ?: AppConfig.CONFIDENCE_THRESHOLD
+            if (conf < threshold) continue
+
+            // for debug
+            Log.d("BBOX", "x1=$x1, y1=$y1, x2=$x2, y2=$y2, conf=$conf, class=$classId")
+
+            val isPixelCoord = x1 > 1.0f || x2 > 1.0f || y2 > 1.0f
+
+            val originalBbox = if (isPixelCoord) {
+                BBox(
+                    x = (x1 / AppConfig.INPUT_SIZE).coerceIn(0f, 1f),
+                    y = (y1 / AppConfig.INPUT_SIZE).coerceIn(0f, 1f),
+                    width = ((x2 - x1) / AppConfig.INPUT_SIZE).coerceIn(0f, 1f),
+                    height = ((y2 - y1) / AppConfig.INPUT_SIZE).coerceIn(0f, 1f)
+                )
+            } else {
+                BBox(
+                    x = x1.coerceIn(0f, 1f),
+                    y = y1.coerceIn(0f, 1f),
+                    width = (x2 - x1).coerceIn(0f, 1f),
+                    height = (y2 - y1).coerceIn(0f, 1f)
+                )
+            }
+
+            val correctedBbox = if (label == "턱") {
+                val cx = if (isPixelCoord) (x1 + x2) / 2 / AppConfig.INPUT_SIZE
+                else (x1 + x2) / 2
+                val cy = if (isPixelCoord) (y1 + y2) / 2 / AppConfig.INPUT_SIZE
+                else (y1 + y2) / 2
+                val size = 0.15f
+                BBox(
+                    x = (cx - size / 2).coerceIn(0f, 1f),
+                    y = (cy - size / 2).coerceIn(0f, 1f),
+                    width = size,
+                    height = size
+                )
+            } else originalBbox
 
             detections.add(
                 Detection(
                     label = label,
-                    confidence = maxConf,
-                    bbox = BBox(
-                        x = (x - w / 2f).coerceIn(0f, 1f), // center → top-left 변환
-                        y = (y - h / 2f).coerceIn(0f, 1f),
-                        width = w.coerceIn(0f, 1f),
-                        height = h.coerceIn(0f, 1f)
-                    ),
+                    confidence = conf,
+                    bbox = correctedBbox,
+                    originalBbox = originalBbox,
                     timestamp = System.currentTimeMillis(),
-                    trackId = -1 // DeepSORT 붙기 전까지 -1
+                    trackId = -1
                 )
             )
         }
+
         return detections
     }
 
-    // int8 모델 결과 파싱 (NPU)
-    // int8 값을 float으로 역정규화해서 처리
-    private fun parseOutputInt8(
+    // NPU int8 모델 출력 파싱
+    // output shape: [1, 300, 6]
+    // 각 detection: [x1, y1, x2, y2, confidence, class_id] (int8 → unsigned 변환)
+    private fun parseOutputInt8NPU(
         output: Array<Array<ByteArray>>,
-        numAttributes: Int,
-        numDetections: Int
+        numDetections: Int,
+        numValues: Int,
+        scale: Float,
+        zeroPoint: Int
     ): List<Detection> {
         val detections = mutableListOf<Detection>()
-        val numClasses = numAttributes - 4 // bbox 4개 제외
+
+        fun dequantize(value: Byte): Float {
+            return (value.toInt() - zeroPoint) * scale
+        }
 
         for (i in 0 until numDetections) {
-            val x = output[0][0][i].toFloat() / 127f // int8 → float 역정규화
-            val y = output[0][1][i].toFloat() / 127f
-            val w = output[0][2][i].toFloat() / 127f
-            val h = output[0][3][i].toFloat() / 127f
 
-            // 클래스별 confidence 중 가장 높은 것
-            var maxConf = 0f
-            var maxIdx = 0
-            for (c in 0 until numClasses) {
-                val conf = output[0][4 + c][i].toFloat() / 127f
-                if (conf > maxConf) {
-                    maxConf = conf
-                    maxIdx = c
-                }
+            val x1 = dequantize(output[0][i][0])
+            val y1 = dequantize(output[0][i][1])
+            val x2 = dequantize(output[0][i][2])
+            val y2 = dequantize(output[0][i][3])
+            val conf = dequantize(output[0][i][4])
+            val classId = dequantize(output[0][i][5]).toInt()
+
+            if (i < 10) {
+                Log.d(
+                    "NPU_OUT",
+                    "i=$i x1=$x1 y1=$y1 x2=$x2 y2=$y2 conf=$conf cls=$classId"
+                )
             }
 
-            // threshold 이하 필터링
-            if (maxConf < AppConfig.CONFIDENCE_THRESHOLD) continue
+            if (classId < 0 || classId >= AppConfig.CLASS_NAMES.size) continue
 
-            // 클래스 인덱스가 범위 벗어나면 무시
-            val label = CLASS_NAMES.getOrNull(maxIdx) ?: continue
+            val label = AppConfig.CLASS_NAMES.getOrNull(classId) ?: continue
+
+            val threshold = AppConfig.STATIC_CLASS_THRESHOLD[label]
+                ?: AppConfig.DYNAMIC_CLASS_THRESHOLD[label]
+                ?: AppConfig.CONFIDENCE_THRESHOLD
+
+            if (conf < threshold) continue
 
             detections.add(
                 Detection(
                     label = label,
-                    confidence = maxConf,
+                    confidence = conf,
                     bbox = BBox(
-                        x = (x - w / 2f).coerceIn(0f, 1f), // center → top-left 변환
-                        y = (y - h / 2f).coerceIn(0f, 1f),
-                        width = w.coerceIn(0f, 1f),
-                        height = h.coerceIn(0f, 1f)
+                        x = x1.coerceIn(0f, 1f),
+                        y = y1.coerceIn(0f, 1f),
+                        width = (x2 - x1).coerceIn(0f, 1f),
+                        height = (y2 - y1).coerceIn(0f, 1f)
                     ),
                     timestamp = System.currentTimeMillis(),
-                    trackId = -1 // DeepSORT 붙기 전까지 -1
+                    trackId = -1
                 )
             )
         }
+
+        if (detections.isNotEmpty()) {
+            Log.d(
+                "DETECTION",
+                "감지: ${detections.size}개 / ${
+                    detections.map { "${it.label}(${String.format("%.2f", it.confidence)})" }
+                }"
+            )
+        }
+
         return detections
     }
 
@@ -289,7 +356,7 @@ class YoloInferenceEngine(private val context: Context) {
     private fun fakeDetect(): List<Detection> {
         return listOf(
             Detection(
-                label = "stairs",
+                label = "계단",
                 confidence = 0.91f,
                 bbox = BBox(0.3f, 0.5f, 0.4f, 0.4f),
                 timestamp = System.currentTimeMillis(),

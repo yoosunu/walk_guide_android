@@ -66,8 +66,10 @@ dependencies {
     implementation("androidx.camera:camera-view:$camerax_version")
 
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")  // 이건 그대로
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
+
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.16.0")
 
 }

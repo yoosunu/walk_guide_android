@@ -16,7 +16,8 @@ data class TrackedObject(
     var frameCount: Int = 1, // 몇 번 유지된 frame 인지 (몇 번 같은 걸로 감지 됐는지)
 
     var lastAlertTimestamp: Long = 0L,
-    var lastAlertLevel: RiskLevel? = null
+    var lastAlertLevel: RiskLevel? = null,
+    var currentRiskLevel: RiskLevel = RiskLevel.IGNORE
 ) {
 
     fun update(newDetection: Detection) {
@@ -28,6 +29,7 @@ data class TrackedObject(
     fun isApproaching(threshold: Float = AppConfig.APPROACHING_THRESHOLD): Boolean {
         val prev = previous ?: return false
 
+        // bbox 넓이 기반
         val prevArea = prev.bbox.width * prev.bbox.height
         val currArea = current.bbox.width * current.bbox.height
         val growthRate = (currArea - prevArea) / prevArea
@@ -35,6 +37,7 @@ data class TrackedObject(
         // 5% 이상 커졌을 때만 접근 중으로 판단
         if (growthRate > threshold) return true
 
+        // depth
         if (prev.depth != null && current.depth != null) {
             return current.depth!! < prev.depth!!
         }
@@ -51,7 +54,7 @@ data class TrackedObject(
         val area = current.bbox.width * current.bbox.height
         if (area < AppConfig.DEPTH_TRIGGER_MIN_AREA) return false // 화면의 2% 미만이면 무시 => 너무 멀면 무시.
         if (!isStable()) return false // 3프레임 미만이면 무시. 잠깐 나타난 것은 노이즈일 수 있음.
-        if (label !in setOf("person", "kickboard", "car")) return false // 동적 객체 아니면 무시. => depth 추론 불 필요.
+        if (label !in AppConfig.DYNAMIC_OBJECTS) return false // 동적 객체 아니면 무시. => depth 추론 불 필요.
         if (isApproaching()) return true // bbox 빠르게 커지며 접근 중이면 depth 추론 해야 됨.
 
         val centerX = current.bbox.x + current.bbox.width / 2

@@ -1,9 +1,11 @@
 package com.circle.walkguide.engine
+import android.util.Log
 import androidx.camera.core.ImageProxy
 import com.circle.walkguide.AppConfig
 import com.circle.walkguide.model.Detection
 import com.circle.walkguide.model.TrackedObject
 import com.circle.walkguide.model.Alert
+import com.circle.walkguide.model.BBox
 import com.circle.walkguide.model.enums.AlertType
 import com.circle.walkguide.model.enums.RiskLevel
 
@@ -46,6 +48,7 @@ class DecisionEngine {
             }
 
             val risk = assessRisk(obj)
+            obj.currentRiskLevel = risk
             if (shouldAlert(obj, risk)) {
                 alerts.add(buildAlert(obj, risk))
                 obj.lastAlertTimestamp = System.currentTimeMillis()
@@ -59,13 +62,20 @@ class DecisionEngine {
 
     // 위험도 평가 로직 => 알림 과다 방지
     private fun assessRisk(obj: TrackedObject): RiskLevel {
-        val area = obj.current.bbox.width * obj.current.bbox.height
+        val area = obj.current.originalBbox.width * obj.current.originalBbox.height
+        Log.d("RISK", "label=${obj.label} area=$area frameCount=${obj.frameCount} stable=${obj.isStable()}")
 
         // 너무 작으면(멀면) 무시
-        if (area < AppConfig.RISK_AREA_IGNORE) return RiskLevel.IGNORE
+        if (area < AppConfig.RISK_AREA_IGNORE) {
+            Log.d("RISK", "label=${obj.label} area=$area → IGNORE (too small)")
+            return RiskLevel.IGNORE
+        }
 
-        // 안정적이지 않으면 무시 => 3프레임 미만이면 노이즈
-        if (!obj.isStable()) return RiskLevel.IGNORE
+        // 안정적이지 않으면 무시 => 3프레임 미만이면 노이즈 => DeepSort
+        if (!obj.isStable()) {
+            Log.d("RISK", "label=${obj.label} frameCount=${obj.frameCount} → IGNORE (unstable)")
+            return RiskLevel.IGNORE
+        }
 
         // depth 있으면 거리 기반 판단 (for later)
         obj.current.depth?.let { d ->
@@ -78,12 +88,14 @@ class DecisionEngine {
         }
 
         // depth 없으면 bbox 크기 기반 판단
-        return when {
-            area > AppConfig.RISK_AREA_CRITICAL -> RiskLevel.CRITICAL // 30% 이상 => 매우 가까움
+        val result = when {
+            area > AppConfig.RISK_AREA_CRITICAL -> RiskLevel.CRITICAL
             area > AppConfig.RISK_AREA_WARNING -> RiskLevel.WARNING
             area > AppConfig.RISK_AREA_CAUTION -> RiskLevel.CAUTION
             else -> RiskLevel.IGNORE
         }
+        Log.d("RISK", "label=${obj.label} area=$area frameCount=${obj.frameCount} stable=${obj.isStable()} → $result")
+        return result
     }
 
     // feed_back으로 갈 Alert 인스턴스 생성 및 반환
@@ -92,33 +104,34 @@ class DecisionEngine {
             trackId = obj.trackId,
             label = obj.label,
             riskLevel = risk,
-            alertType = when (obj.label) {
-                "person", "kickboard", "car" -> AlertType.COLLISION
-                "stairs", "manhole", "curb", "hole" -> AlertType.OBSTACLE
+            alertType = when {
+                AppConfig.STATIC_OBJECTS.contains(obj.label) -> AlertType.OBSTACLE
+                AppConfig.DYNAMIC_OBJECTS.contains(obj.label) -> AlertType.COLLISION
                 else -> AlertType.NONE
             },
             distance = obj.current.depth,
             timestamp = System.currentTimeMillis(),
-            message = buildMessage(obj.label, obj.current.depth)
+            message = buildMessage(obj.label, obj.current.depth, obj.current.bbox, risk)
         )
     }
 
     // for making TTS sentence
-    private fun buildMessage(label: String, distance: Float?): String {
-        val labelKo = when (label) {
-            "stairs"  -> "계단"
-            "manhole" -> "맨홀"
-            "curb"    -> "턱"
-            "hole"    -> "구멍"
-            "person"  -> "사람"
-            "kickboard" -> "킥보드"
-            else -> label
+    private fun buildMessage(label: String, distance: Float?, bbox: BBox, risk: RiskLevel): String {
+        val direction = when {
+            bbox.x + bbox.width / 2 < 0.33f -> "왼쪽"
+            bbox.x + bbox.width / 2 > 0.66f -> "오른쪽"
+            else -> "정면"
         }
-
+        val urgency = when (risk) {
+            RiskLevel.CRITICAL -> "위험"
+            RiskLevel.WARNING  -> "주의"
+            else -> ""
+        }
         return if (distance != null) {
-            "${distance.toInt()}미터 앞 $labelKo"
+            "$direction ${distance.toInt()}미터 앞 $label $urgency".trim()
         } else {
-            "$labelKo 주의"
+            if (urgency.isEmpty()) "$direction $label"
+            else "$direction $label $urgency"
         }
     }
 
@@ -135,6 +148,7 @@ class DecisionEngine {
             val lastLevel = obj.lastAlertLevel ?: return true
             return risk > lastLevel
         }
+//        if (now - obj.lastAlertTimestamp < AppConfig.ALERT_COOLDOWN_WALKING) return false
 
         return true
     }

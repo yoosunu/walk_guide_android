@@ -15,7 +15,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Button
@@ -41,6 +42,8 @@ import android.util.Log
 import androidx.camera.view.PreviewView
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.viewinterop.AndroidView
 
 import android.hardware.Sensor
@@ -53,6 +56,7 @@ import kotlin.math.sqrt
 
 import com.circle.walkguide.camera.CameraManager
 import com.circle.walkguide.engine.DecisionEngine
+import com.circle.walkguide.inference.DepthInferenceEngine
 import com.circle.walkguide.inference.YoloInferenceEngine
 import com.circle.walkguide.model.BBox
 import com.circle.walkguide.model.Detection
@@ -76,6 +80,8 @@ class MainActivity : ComponentActivity(), SensorEventListener // 다중 구현
     var appMode = mutableStateOf(AppMode.WALKING)
 
     override fun onSensorChanged(event: SensorEvent) {
+        if (AppConfig.USE_FAKE_MODE) return  // 에뮬레이터 테스트 시 센서 무시
+
         // magnitude: x, y, z 세 축 가속도 합쳐서 전체 움직임 크기 계산
         val magnitude = sqrt(
             event.values[0] * event.values[0] +
@@ -137,6 +143,7 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) } // for box overlay
     var inferenceStats by remember { mutableStateOf(InferenceStats()) } // 화면 stats 표시용
     var lastInferenceTime = remember { 0L } // FPS 계산용
+    var logMessages by remember { mutableStateOf<List<String>>(emptyList()) } // 화면 로그
 
     // for testing => temporary instance
     val decisionEngine = remember { DecisionEngine() } // 재생성x, 유지 by remember
@@ -144,11 +151,19 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val inferenceEngine = remember { YoloInferenceEngine(context) }
+    val depthEngine = remember {
+        if (AppConfig.USE_DEPTH) DepthInferenceEngine(context) else null
+    }
+
+    val currentMode = if (appMode.value == AppMode.WALKING) "WALKING" else "STATIONARY"
+    val currentRiskState = remember { mutableStateOf("IGNORE") }
+
     val cameraManager = remember {
         CameraManager(
             context = context,
             lifecycleOwner = lifecycleOwner,
             inferenceEngine = inferenceEngine,
+            depthEngine = depthEngine,
             onDetectionResult = { newDetections, _ -> // _ : Bitmap (not using here)
                 // FPS 계산
                 val now = System.currentTimeMillis()
@@ -158,24 +173,38 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                 lastInferenceTime = now
 
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
+//                    if (newDetections.isNotEmpty()) detections = newDetections // bbox 유지하게 설정 => for debugging
                     detections = newDetections
                     inferenceStats = InferenceStats(
                         hardwareName = inferenceEngine.getCurrentHardwareName(),
                         inferenceMs = inferenceEngine.lastInferenceMs,
                         fps = fps
                     )
+                    // 감지 로그 화면에 추가 (최대 20줄 유지)
+                    if (newDetections.isNotEmpty()) {
+                        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                            .format(java.util.Date())
+                        val logEntry = "[$time] ${newDetections.map { "${it.label}(${"%.2f".format(it.confidence)}) #${it.trackId}" }}"
+                        logMessages = (logMessages + listOf(logEntry)).takeLast(100)
+                    }
                 }
                 val alerts = decisionEngine.process(newDetections)
                 alerts.forEach { alert ->
                     FeedbackManager.speak(alert.message)
                     Log.d("DE_TEST", "Alert: ${alert.message} / ${alert.riskLevel}")
                 }
+
+                // UI 업데이트
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    currentRiskState.value = if (alerts.isNotEmpty()) {
+                        alerts.maxByOrNull { it.riskLevel.ordinal }?.riskLevel?.name ?: "IGNORE"
+                    } else {
+                        "IGNORE"
+                    }
+                }
             }
         )
     }
-
-    val currentMode = if (appMode.value == AppMode.WALKING) "WALKING" else "STATIONARY"
-    var currentRisk by remember { mutableStateOf("IGNORE") }
 
     Scaffold(
         topBar = {
@@ -228,12 +257,12 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                             color = Color.Green,
                             topLeft = androidx.compose.ui.geometry.Offset(left, top),
                             size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 6f)
                         )
 
                         // 라벨 텍스트
                         drawContext.canvas.nativeCanvas.drawText(
-                            "${detection.label} ${"%.2f".format(detection.confidence)}",
+                            "${detection.label} ${"%.2f".format(detection.confidence)} #${detection.trackId}",
                             left,
                             if (top > 50f) top - 10f else bottom + 40f,
                             android.graphics.Paint().apply {
@@ -254,11 +283,21 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                 ) {
                     Text(
                         text = "Mode: $currentMode",
-                        color = Color.Red
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                     Text(
-                        text = "Risk: $currentRisk",
-                        color = Color.Red
+                        text = "Risk: ${currentRiskState.value}",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
                 // 추론 stats 오버레이 (우측 하단)
@@ -272,28 +311,37 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                         )
                         .padding(8.dp)
                 ) {
+                    Text(text = "HW: ${inferenceStats.hardwareName}", color = Color.Yellow, fontSize = 12.sp)
+                    Text(text = "${inferenceStats.inferenceMs}ms", color = Color.Yellow, fontSize = 12.sp)
+                    Text(text = "${"%.1f".format(inferenceStats.fps)} fps", color = Color.Yellow, fontSize = 12.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 감지 로그 뷰 (컴퓨터 없이 디버깅용)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(100.dp)
+                    .background(Color.Black.copy(alpha = 0.9f), RoundedCornerShape(8.dp))
+                    .padding(8.dp)
+            ) {
+                items(logMessages) { log ->
                     Text(
-                        text = "HW: ${inferenceStats.hardwareName}",
-                        color = Color.Yellow,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = "${inferenceStats.inferenceMs}ms",
-                        color = Color.Yellow,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = "${"%.1f".format(inferenceStats.fps)} fps",
-                        color = Color.Yellow,
-                        fontSize = 12.sp
+                        text = log,
+                        color = Color.Green,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider()
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
+            // foot
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -304,7 +352,7 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                     onClick = {
                         val fakeDetections = listOf(
                             Detection(
-                                label = "kickboard",
+                                label = "킥보드",
                                 confidence = 0.91f,
                                 bbox = BBox(0.3f, 0.5f, 0.4f, 0.4f),
                                 timestamp = System.currentTimeMillis(),
@@ -339,8 +387,8 @@ fun WalkGuideApp(appMode: MutableState<AppMode>) {
                     text = "Risk",
                     modifier = Modifier.weight(1f),
                     onClick = {
-                        currentRisk =
-                            if (currentRisk == "IGNORE") "WARNING" else "IGNORE"
+                        currentRiskState.value =
+                            if (currentRiskState.value == "IGNORE") "WARNING" else "IGNORE"
                     }
                 )
             }
