@@ -11,6 +11,7 @@ import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.DataType
+import kotlin.math.roundToInt
 
 class YoloInferenceEngine(private val context: Context) {
 
@@ -299,19 +300,15 @@ class YoloInferenceEngine(private val context: Context) {
         }
 
         for (i in 0 until numDetections) {
-
-            val x1 = dequantize(output[0][i][0])
-            val y1 = dequantize(output[0][i][1])
-            val x2 = dequantize(output[0][i][2])
-            val y2 = dequantize(output[0][i][3])
+            val x1   = dequantize(output[0][i][0])
+            val y1   = dequantize(output[0][i][1])
+            val x2   = dequantize(output[0][i][2])
+            val y2   = dequantize(output[0][i][3])
             val conf = dequantize(output[0][i][4])
-            val classId = dequantize(output[0][i][5]).toInt()
+            val classId = dequantize(output[0][i][5]).roundToInt()  // 이걸로
 
             if (i < 10) {
-                Log.d(
-                    "NPU_OUT",
-                    "i=$i x1=$x1 y1=$y1 x2=$x2 y2=$y2 conf=$conf cls=$classId"
-                )
+                Log.d("NPU_OUT", "i=$i x1=$x1 y1=$y1 x2=$x2 y2=$y2 conf=$conf cls=$classId")
             }
 
             if (classId < 0 || classId >= AppConfig.CLASS_NAMES.size) continue
@@ -321,19 +318,34 @@ class YoloInferenceEngine(private val context: Context) {
             val threshold = AppConfig.STATIC_CLASS_THRESHOLD[label]
                 ?: AppConfig.DYNAMIC_CLASS_THRESHOLD[label]
                 ?: AppConfig.CONFIDENCE_THRESHOLD
-
             if (conf < threshold) continue
+
+            // 턱 bbox 보정
+            val originalBbox = BBox(
+                x = x1.coerceIn(0f, 1f),
+                y = y1.coerceIn(0f, 1f),
+                width = (x2 - x1).coerceIn(0f, 1f),
+                height = (y2 - y1).coerceIn(0f, 1f)
+            )
+
+            val correctedBbox = if (label == "턱") {
+                val cx = (x1 + x2) / 2
+                val cy = (y1 + y2) / 2
+                val size = 0.15f
+                BBox(
+                    x = (cx - size / 2).coerceIn(0f, 1f),
+                    y = (cy - size / 2).coerceIn(0f, 1f),
+                    width = size,
+                    height = size
+                )
+            } else originalBbox
 
             detections.add(
                 Detection(
                     label = label,
                     confidence = conf,
-                    bbox = BBox(
-                        x = x1.coerceIn(0f, 1f),
-                        y = y1.coerceIn(0f, 1f),
-                        width = (x2 - x1).coerceIn(0f, 1f),
-                        height = (y2 - y1).coerceIn(0f, 1f)
-                    ),
+                    bbox = correctedBbox,
+                    originalBbox = originalBbox,
                     timestamp = System.currentTimeMillis(),
                     trackId = -1
                 )

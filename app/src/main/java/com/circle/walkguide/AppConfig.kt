@@ -30,16 +30,15 @@ object AppConfig {
 
     // model file format
     const val MODEL_FILE_NPU = "yolo_npu.tflite"
-//    const val MODEL_FILE_CPU = "yolo_cpu.tflite"
-    const val MODEL_FILE_CPU = "best_int8.tflite"
+    const val MODEL_FILE_CPU = "yolo_cpu.tflite"
     const val MODEL_FILE_GPU = "yolo_gpu.tflite"
 
     // inference hw selection
     const val USE_CPU = 0
     const val USE_GPU = 1
     const val USE_NPU = 2
-//    const val INFERENCE_HARDWARE = USE_NPU
-    const val INFERENCE_HARDWARE = USE_CPU
+    const val INFERENCE_HARDWARE = USE_NPU
+//    const val INFERENCE_HARDWARE = USE_CPU
 //    const val INFERENCE_HARDWARE = USE_GPU
 
     // class
@@ -54,9 +53,9 @@ object AppConfig {
     // class threshold
     val STATIC_CLASS_THRESHOLD = mapOf(
         "계단"   to 0.80f,
-        "턱"   to 0.80f,
+        "턱"   to 0.75f,
         "구멍"   to 0.50f,
-        "기둥"   to 0.80f,
+        "기둥"   to 0.70f,
         "볼라드" to 0.70f,
         "나무"   to 0.99f
     )

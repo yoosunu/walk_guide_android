@@ -27,10 +27,12 @@ object ImagePreprocessor {
         imageProxy: ImageProxy,
         hardwareMode: Int = AppConfig.INFERENCE_HARDWARE
     ): ByteBuffer {
-        val bitmapStart = System.nanoTime()         // 추가
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        Log.d("CAMERA", "rotation: ${imageProxy.imageInfo.rotationDegrees}")
+
+        val bitmapStart = System.nanoTime()
         val bitmap = imageProxy.toBitmap()
 
-        val rotation = imageProxy.imageInfo.rotationDegrees
         val rotatedBitmap = if (rotation != 0) {
             val matrix = android.graphics.Matrix()
             matrix.postRotate(rotation.toFloat())
