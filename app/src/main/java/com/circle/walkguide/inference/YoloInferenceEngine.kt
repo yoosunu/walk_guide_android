@@ -123,6 +123,9 @@ class YoloInferenceEngine(private val context: Context) {
         val outputType = outputTensor.dataType()
         val outputQuant = outputTensor.quantizationParams()
 
+        Log.d("TENSOR", "output scale=${outputQuant.scale}")
+        Log.d("TENSOR", "output zeroPoint=${outputQuant.zeroPoint}")
+
         val numDetections = outputShape[1]
         val numValues = outputShape[2]
 
@@ -204,6 +207,55 @@ class YoloInferenceEngine(private val context: Context) {
         }
     }
 
+    // IoU 기반 NMS
+// iouThreshold: 이 이상 겹치면 낮은 confidence 제거
+    private fun applyNMS(detections: List<Detection>, iouThreshold: Float): List<Detection> {
+        val sorted = detections.sortedByDescending { it.confidence }
+        val result = mutableListOf<Detection>()
+
+        val suppressed = BooleanArray(sorted.size)
+
+        for (i in sorted.indices) {
+            if (suppressed[i]) continue
+            result.add(sorted[i])
+
+            for (j in i + 1 until sorted.size) {
+                if (suppressed[j]) continue
+                if (sorted[i].label != sorted[j].label) continue  // 같은 클래스끼리만 비교
+                val iou = computeIou(sorted[i].originalBbox, sorted[j].originalBbox)
+                if (iou > iouThreshold) {
+                    suppressed[j] = true
+                }
+            }
+        }
+
+        return result
+    }
+
+    private fun computeIou(a: BBox, b: BBox): Float {
+        val ax1 = a.x
+        val ay1 = a.y
+        val ax2 = a.x + a.width
+        val ay2 = a.y + a.height
+
+        val bx1 = b.x
+        val by1 = b.y
+        val bx2 = b.x + b.width
+        val by2 = b.y + b.height
+
+        val interX1 = maxOf(ax1, bx1)
+        val interY1 = maxOf(ay1, by1)
+        val interX2 = minOf(ax2, bx2)
+        val interY2 = minOf(ay2, by2)
+
+        val interArea = maxOf(0f, interX2 - interX1) * maxOf(0f, interY2 - interY1)
+        val aArea = a.width * a.height
+        val bArea = b.width * b.height
+        val unionArea = aArea + bArea - interArea
+
+        return if (unionArea <= 0f) 0f else interArea / unionArea
+    }
+
     // float32 모델 출력 파싱 (CPU / GPU)
     // output shape: [1, 300, 6]
     // 각 detection: [x1, y1, x2, y2, confidence, class_id]
@@ -254,25 +306,26 @@ class YoloInferenceEngine(private val context: Context) {
                 )
             }
 
-            val correctedBbox = if (label == "턱") {
-                val cx = if (isPixelCoord) (x1 + x2) / 2 / AppConfig.INPUT_SIZE
-                else (x1 + x2) / 2
-                val cy = if (isPixelCoord) (y1 + y2) / 2 / AppConfig.INPUT_SIZE
-                else (y1 + y2) / 2
-                val size = 0.15f
-                BBox(
-                    x = (cx - size / 2).coerceIn(0f, 1f),
-                    y = (cy - size / 2).coerceIn(0f, 1f),
-                    width = size,
-                    height = size
-                )
-            } else originalBbox
+            // 턱 보정 시도
+//            val correctedBbox = if (label == "턱") {
+//                val cx = if (isPixelCoord) (x1 + x2) / 2 / AppConfig.INPUT_SIZE
+//                else (x1 + x2) / 2
+//                val cy = if (isPixelCoord) (y1 + y2) / 2 / AppConfig.INPUT_SIZE
+//                else (y1 + y2) / 2
+//                val size = 0.15f
+//                BBox(
+//                    x = (cx - size / 2).coerceIn(0f, 1f),
+//                    y = (cy - size / 2).coerceIn(0f, 1f),
+//                    width = size,
+//                    height = size
+//                )
+//            } else originalBbox
 
             detections.add(
                 Detection(
                     label = label,
                     confidence = conf,
-                    bbox = correctedBbox,
+                    bbox = originalBbox,
                     originalBbox = originalBbox,
                     timestamp = System.currentTimeMillis(),
                     trackId = -1
@@ -280,7 +333,7 @@ class YoloInferenceEngine(private val context: Context) {
             )
         }
 
-        return detections
+        return applyNMS(detections, 0.5f)
     }
 
     // NPU int8 모델 출력 파싱
@@ -328,23 +381,24 @@ class YoloInferenceEngine(private val context: Context) {
                 height = (y2 - y1).coerceIn(0f, 1f)
             )
 
-            val correctedBbox = if (label == "턱") {
-                val cx = (x1 + x2) / 2
-                val cy = (y1 + y2) / 2
-                val size = 0.15f
-                BBox(
-                    x = (cx - size / 2).coerceIn(0f, 1f),
-                    y = (cy - size / 2).coerceIn(0f, 1f),
-                    width = size,
-                    height = size
-                )
-            } else originalBbox
+            // 턱 보정 시도
+//            val correctedBbox = if (label == "턱") {
+//                val cx = (x1 + x2) / 2
+//                val cy = (y1 + y2) / 2
+//                val size = 0.15f
+//                BBox(
+//                    x = (cx - size / 2).coerceIn(0f, 1f),
+//                    y = (cy - size / 2).coerceIn(0f, 1f),
+//                    width = size,
+//                    height = size
+//                )
+//            } else originalBbox
 
             detections.add(
                 Detection(
                     label = label,
                     confidence = conf,
-                    bbox = correctedBbox,
+                    bbox = originalBbox,
                     originalBbox = originalBbox,
                     timestamp = System.currentTimeMillis(),
                     trackId = -1
@@ -361,7 +415,7 @@ class YoloInferenceEngine(private val context: Context) {
             )
         }
 
-        return detections
+        return applyNMS(detections, 0.5f)
     }
 
     // 가짜 추론 (테스트 용)

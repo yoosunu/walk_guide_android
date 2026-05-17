@@ -26,6 +26,7 @@ object FeedbackManager {
     // QUEUE_FLUSH가 stop() 기능을 포함함. 따로 구현 필요 없음.
     fun speak(message: String) {
         if (!isTtsReady) return
+        if (tts?.isSpeaking == true) return  // 말하는 중이면 무시
         tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, null)
     }
 
